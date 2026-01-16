@@ -308,13 +308,19 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	}
 
 	// Convert tools to Gemini functionDeclarations format
+	// Supports both OpenAI standard format and Cursor simplified format:
+	// - OpenAI: {"type": "function", "name": "...", "parameters": {...}}
+	// - Cursor: {"name": "...", "description": "...", "input_schema": {...}}
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		geminiTools := `[{"functionDeclarations":[]}]`
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
-				funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
+			funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
+			hasValidTool := false
 
+			// Check for OpenAI standard format: {"type": "function", ...}
+			if tool.Get("type").String() == "function" {
+				hasValidTool = true
 				if name := tool.Get("name"); name.Exists() {
 					funcDecl, _ = sjson.Set(funcDecl, "name", name.String())
 				}
@@ -339,7 +345,35 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 					cleaned, _ = sjson.Set(cleaned, "type", "OBJECT")
 					funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
 				}
+			} else if tool.Get("name").Exists() && !tool.Get("function").Exists() {
+				// Cursor simplified format: {"name": "...", "description": "...", "input_schema": {...}}
+				hasValidTool = true
+				funcDecl, _ = sjson.Set(funcDecl, "name", tool.Get("name").String())
+				if desc := tool.Get("description"); desc.Exists() {
+					funcDecl, _ = sjson.Set(funcDecl, "description", desc.String())
+				}
+				if inputSchema := tool.Get("input_schema"); inputSchema.Exists() {
+					// Convert parameter types from Cursor format to Gemini format
+					cleaned := inputSchema.Raw
+					paramsResult := gjson.Parse(cleaned)
+					if properties := paramsResult.Get("properties"); properties.Exists() {
+						properties.ForEach(func(key, value gjson.Result) bool {
+							if propType := value.Get("type"); propType.Exists() {
+								upperType := strings.ToUpper(propType.String())
+								cleaned, _ = sjson.Set(cleaned, "properties."+key.String()+".type", upperType)
+							}
+							return true
+						})
+					}
+					// Set the overall type to OBJECT if not already set
+					if !gjson.Get(cleaned, "type").Exists() || gjson.Get(cleaned, "type").String() != "OBJECT" {
+						cleaned, _ = sjson.Set(cleaned, "type", "OBJECT")
+					}
+					funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
+				}
+			}
 
+			if hasValidTool {
 				geminiTools, _ = sjson.SetRaw(geminiTools, "0.functionDeclarations.-1", funcDecl)
 			}
 			return true

@@ -272,29 +272,37 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	}
 
 	// tools -> tools[0].functionDeclarations + tools[0].googleSearch passthrough
+	// Supports both OpenAI standard format and Cursor simplified format:
+	// - OpenAI: {"type": "function", "function": {"name": "...", "parameters": {...}}}
+	// - Cursor: {"name": "...", "description": "...", "input_schema": {...}}
 	tools := gjson.GetBytes(rawJSON, "tools")
 	if tools.IsArray() && len(tools.Array()) > 0 {
 		toolNode := []byte(`{}`)
 		hasTool := false
 		hasFunction := false
 		for _, t := range tools.Array() {
+			var fnRaw string
+			var toolName string
+
+			// Check for OpenAI standard format: {"type": "function", "function": {...}}
 			if t.Get("type").String() == "function" {
 				fn := t.Get("function")
 				if fn.Exists() && fn.IsObject() {
-					fnRaw := fn.Raw
+					fnRaw = fn.Raw
+					toolName = fn.Get("name").String()
 					if fn.Get("parameters").Exists() {
 						renamed, errRename := util.RenameKey(fnRaw, "parameters", "parametersJsonSchema")
 						if errRename != nil {
-							log.Warnf("Failed to rename parameters for tool '%s': %v", fn.Get("name").String(), errRename)
+							log.Warnf("Failed to rename parameters for tool '%s': %v", toolName, errRename)
 							var errSet error
 							fnRaw, errSet = sjson.Set(fnRaw, "parametersJsonSchema.type", "object")
 							if errSet != nil {
-								log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
+								log.Warnf("Failed to set default schema type for tool '%s': %v", toolName, errSet)
 								continue
 							}
 							fnRaw, errSet = sjson.SetRaw(fnRaw, "parametersJsonSchema.properties", `{}`)
 							if errSet != nil {
-								log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
+								log.Warnf("Failed to set default schema properties for tool '%s': %v", toolName, errSet)
 								continue
 							}
 						} else {
@@ -304,29 +312,60 @@ func ConvertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						var errSet error
 						fnRaw, errSet = sjson.Set(fnRaw, "parametersJsonSchema.type", "object")
 						if errSet != nil {
-							log.Warnf("Failed to set default schema type for tool '%s': %v", fn.Get("name").String(), errSet)
+							log.Warnf("Failed to set default schema type for tool '%s': %v", toolName, errSet)
 							continue
 						}
 						fnRaw, errSet = sjson.SetRaw(fnRaw, "parametersJsonSchema.properties", `{}`)
 						if errSet != nil {
-							log.Warnf("Failed to set default schema properties for tool '%s': %v", fn.Get("name").String(), errSet)
+							log.Warnf("Failed to set default schema properties for tool '%s': %v", toolName, errSet)
 							continue
 						}
 					}
 					fnRaw, _ = sjson.Delete(fnRaw, "strict")
-					if !hasFunction {
-						toolNode, _ = sjson.SetRawBytes(toolNode, "functionDeclarations", []byte("[]"))
-					}
-					tmp, errSet := sjson.SetRawBytes(toolNode, "functionDeclarations.-1", []byte(fnRaw))
+				}
+			} else if t.Get("name").Exists() && !t.Get("function").Exists() {
+				// Cursor simplified format: {"name": "...", "description": "...", "input_schema": {...}}
+				toolName = t.Get("name").String()
+				fnRaw = `{}`
+				var errSet error
+				fnRaw, errSet = sjson.Set(fnRaw, "name", toolName)
+				if errSet != nil {
+					log.Warnf("Failed to set name for Cursor tool '%s': %v", toolName, errSet)
+					continue
+				}
+				if desc := t.Get("description"); desc.Exists() {
+					fnRaw, _ = sjson.Set(fnRaw, "description", desc.String())
+				}
+				if inputSchema := t.Get("input_schema"); inputSchema.Exists() {
+					fnRaw, errSet = sjson.SetRaw(fnRaw, "parametersJsonSchema", inputSchema.Raw)
 					if errSet != nil {
-						log.Warnf("Failed to append tool declaration for '%s': %v", fn.Get("name").String(), errSet)
-						continue
+						log.Warnf("Failed to set input_schema for Cursor tool '%s': %v", toolName, errSet)
+						// Fallback to default schema
+						fnRaw, _ = sjson.Set(fnRaw, "parametersJsonSchema.type", "object")
+						fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema.properties", `{}`)
 					}
-					toolNode = tmp
-					hasFunction = true
-					hasTool = true
+				} else {
+					// No input_schema provided, use default
+					fnRaw, _ = sjson.Set(fnRaw, "parametersJsonSchema.type", "object")
+					fnRaw, _ = sjson.SetRaw(fnRaw, "parametersJsonSchema.properties", `{}`)
 				}
 			}
+
+			// Append function declaration if we have one
+			if fnRaw != "" && fnRaw != "{}" {
+				if !hasFunction {
+					toolNode, _ = sjson.SetRawBytes(toolNode, "functionDeclarations", []byte("[]"))
+				}
+				tmp, errSet := sjson.SetRawBytes(toolNode, "functionDeclarations.-1", []byte(fnRaw))
+				if errSet != nil {
+					log.Warnf("Failed to append tool declaration for '%s': %v", toolName, errSet)
+					continue
+				}
+				toolNode = tmp
+				hasFunction = true
+				hasTool = true
+			}
+
 			if gs := t.Get("google_search"); gs.Exists() {
 				var errSet error
 				toolNode, errSet = sjson.SetRawBytes(toolNode, "googleSearch", []byte(gs.Raw))

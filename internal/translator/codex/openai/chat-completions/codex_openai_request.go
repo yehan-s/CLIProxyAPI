@@ -270,6 +270,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	}
 
 	// Map tools (flatten function fields)
+	// Supports both OpenAI standard format and Cursor simplified format:
+	// - OpenAI: {"type": "function", "function": {"name": "...", "parameters": {...}}}
+	// - Cursor: {"name": "...", "description": "...", "input_schema": {...}}
 	tools := gjson.GetBytes(rawJSON, "tools")
 	if tools.IsArray() && len(tools.Array()) > 0 {
 		out, _ = sjson.SetRaw(out, "tools", `[]`)
@@ -307,6 +310,24 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					if v := fn.Get("strict"); v.Exists() {
 						item, _ = sjson.Set(item, "strict", v.Value())
 					}
+				}
+				out, _ = sjson.SetRaw(out, "tools.-1", item)
+			} else if t.Get("name").Exists() && !t.Get("function").Exists() {
+				// Cursor simplified format: {"name": "...", "description": "...", "input_schema": {...}}
+				item := `{}`
+				item, _ = sjson.Set(item, "type", "function")
+				name := t.Get("name").String()
+				if short, ok := originalToolNameMap[name]; ok {
+					name = short
+				} else {
+					name = shortenNameIfNeeded(name)
+				}
+				item, _ = sjson.Set(item, "name", name)
+				if v := t.Get("description"); v.Exists() {
+					item, _ = sjson.Set(item, "description", v.Value())
+				}
+				if v := t.Get("input_schema"); v.Exists() {
+					item, _ = sjson.SetRaw(item, "parameters", v.Raw)
 				}
 				out, _ = sjson.SetRaw(out, "tools.-1", item)
 			}

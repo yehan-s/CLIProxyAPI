@@ -305,6 +305,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				tJSON, _ = sjson.SetRaw(tJSON, "input_schema", params.Raw)
 			} else if params = tool.Get("parametersJsonSchema"); params.Exists() {
 				tJSON, _ = sjson.SetRaw(tJSON, "input_schema", params.Raw)
+			} else if params = tool.Get("input_schema"); params.Exists() {
+				// Cursor format already uses input_schema
+				tJSON, _ = sjson.SetRaw(tJSON, "input_schema", params.Raw)
 			}
 
 			toolsJSON, _ = sjson.SetRaw(toolsJSON, "-1", tJSON)

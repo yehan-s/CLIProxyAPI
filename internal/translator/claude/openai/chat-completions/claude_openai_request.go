@@ -246,12 +246,18 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools
+	// Supports both OpenAI standard format and Cursor simplified format:
+	// - OpenAI: {"type": "function", "function": {"name": "...", "parameters": {...}}}
+	// - Cursor: {"name": "...", "description": "...", "input_schema": {...}}
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		hasAnthropicTools := false
 		tools.ForEach(func(_, tool gjson.Result) bool {
+			anthropicTool := `{"name":"","description":""}`
+			hasValidTool := false
+
+			// Check for OpenAI standard format: {"type": "function", "function": {...}}
 			if tool.Get("type").String() == "function" {
 				function := tool.Get("function")
-				anthropicTool := `{"name":"","description":""}`
 				anthropicTool, _ = sjson.Set(anthropicTool, "name", function.Get("name").String())
 				anthropicTool, _ = sjson.Set(anthropicTool, "description", function.Get("description").String())
 
@@ -261,7 +267,20 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
 					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", parameters.Raw)
 				}
+				hasValidTool = true
+			} else if tool.Get("name").Exists() && !tool.Get("function").Exists() {
+				// Cursor simplified format: {"name": "...", "description": "...", "input_schema": {...}}
+				anthropicTool, _ = sjson.Set(anthropicTool, "name", tool.Get("name").String())
+				if desc := tool.Get("description"); desc.Exists() {
+					anthropicTool, _ = sjson.Set(anthropicTool, "description", desc.String())
+				}
+				if inputSchema := tool.Get("input_schema"); inputSchema.Exists() {
+					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", inputSchema.Raw)
+				}
+				hasValidTool = true
+			}
 
+			if hasValidTool {
 				out, _ = sjson.SetRaw(out, "tools.-1", anthropicTool)
 				hasAnthropicTools = true
 			}
